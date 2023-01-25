@@ -8,9 +8,10 @@ def add_differential_peaks(adata,cluster_basis):
     """
     : Add differential peaks based on clusters using Fisher's exact test
     """
+    print("Make sure the input adata has raw counts!")
     adata_copy = adata.copy()
     
-    data_bin = pd.DataFrame((adata.raw.X.toarray()>0.0)*1.0,
+    data_bin = pd.DataFrame((adata.X.A>0.0)*1.0,
                             columns=adata.var_names,index=adata.obs_names)
     
     celltypes = adata.obs[cluster_basis]
@@ -22,7 +23,7 @@ def add_differential_peaks(adata,cluster_basis):
     col_list = list(data_bin.columns)
 
     for n, c in enumerate(communities_to_explore):
-
+        print(c)
         pval_lt = list()
         odds_lt = list()
 
