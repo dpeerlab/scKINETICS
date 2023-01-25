@@ -56,7 +56,7 @@ class GenomeRecord():
             
             print("Loading motifs ...")
             #todo: replace path with variable as in celloracle
-            self.motifs = read_motif_file("/data/peer/zhaoc5/projects/ATACVelo/atacvelo/CisBP_ver2_Mus_musculus.pfm")
+            self.motifs = read_motif_file("CisBP_ver2_Mus_musculus.pfm")
             
             TXDB= importr('TxDb.Mmusculus.UCSC.mm10.knownGene')
             self.genome_annotations = TXDB.TxDb_Mmusculus_UCSC_mm10_knownGene
@@ -67,7 +67,7 @@ class GenomeRecord():
             self.genome = Genome(assembly='hg38',chromosomes=chromosomes)
             #todo: replace path with variable as in celloracle
             print("Loading motifs ...")
-            self.motifs = read_motif_file("/data/peer/zhaoc5/projects/ATACVelo/atacvelo/CisBP_ver2_Homo_sapiens.pfm")
+            self.motifs = read_motif_file("CisBP_ver2_Homo_sapiens.pfm")
             
             TXDB= importr('TxDb.Hsapiens.UCSC.hg38.knownGene')
             self.genome_annotations = TXDB.TxDb_Hsapiens_UCSC_hg38_knownGene
@@ -118,7 +118,7 @@ class PeakAnnotation():
                 print("Loading motifs ...")
                 #todo: replace path with variable as in celloracle
                 #self.motifs = read_motifs("atacvelo/data/motif_data/CisBP_ver2_Mus_musculus.pfm")
-                self.motifs = read_motif_file("/data/peer/zhaoc5/projects/ATACVelo/atacvelo/CisBP_ver2_Mus_musculus.pfm",self.genes)
+                self.motifs = read_motif_file("CisBP_ver2_Mus_musculus.pfm",self.genes)
 
                 TXDB= importr('TxDb.Mmusculus.UCSC.mm10.knownGene')
                 self.genome_annotations = TXDB.TxDb_Mmusculus_UCSC_mm10_knownGene
@@ -129,7 +129,7 @@ class PeakAnnotation():
                 self.genome = Genome(assembly='hg38',chromosomes=chromosomes)
                 #todo: replace path with variable as in celloracle
                 print("Loading motifs ...")
-                self.motifs = read_motif_file("/data/peer/zhaoc5/projects/ATACVelo/atacvelo/CisBP_ver2_Homo_sapiens.pfm",self.genes)
+                self.motifs = read_motif_file("CisBP_ver2_Homo_sapiens.pfm",self.genes)
 
                 TXDB= importr('TxDb.Hsapiens.UCSC.hg38.knownGene')
                 self.genome_annotations = TXDB.TxDb_Hsapiens_UCSC_hg38_knownGene
@@ -238,7 +238,7 @@ class PeakAnnotation():
         return record_dict
 
     def compute_background(self,record_dict):
-        print("Computing background...")
+        print("\nComputing background...")
         GC_content = np.array([record_dict[rec].GC for rec in record_dict])
         peak_names = np.array([record_dict[rec].id for rec in record_dict])
         
@@ -383,7 +383,8 @@ def read_peak_bed(peak_bed_file_path,npeaks=10):
     
     
 def read_motif_file(motif_file,genes):
-    motifs = read_motifs(motif_file)
+    motif_dir=os.getcwd()+'/sckinetics/motif_data/'
+    motifs = read_motifs(motif_dir+motif_file)
     motifs_keep = []
     # to do: parallelize this
     for motif in motifs:

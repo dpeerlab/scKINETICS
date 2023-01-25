@@ -1,11 +1,10 @@
-"""
-This is the old EM code, just keeping it here for reference
-"""
 import os
+import time
 import scanpy as sc
 import pandas as pd
 import numpy as np
 from math import ceil
+from numba import njit
 
 from scipy.stats import norm
 from scipy.sparse import csr_matrix
@@ -28,7 +27,7 @@ class ExpectationMaximization():
         
     def __init__(self, maxiter=20, tol=.0001, knn=50, sigma=5.0, sigma_prior = 1.0, threads=20):
         self.maxiter = maxiter
-        assert maxiter >= 15, f"Need at least 15 EM iterations, got: {maxiter}"
+        assert (maxiter >= 15 and maxiter <=30), f"We suggest maxiter between 15 to 30, got: {maxiter}"
         self.tol = tol
         self.knn=knn
         self.sigma=sigma
@@ -51,16 +50,103 @@ class ExpectationMaximization():
         print('Running on {} threads.'.format(threads))
     
     def fit(self, adata, G, celltypes_basis=None):
+        
+        def fit_gene_analytic(targets):
+ 
+            maxiter=self.maxiter
+            curves = {}
+            
+            def prior(a,ahat,ascale):
+                prior=np.sum(norm.logpdf(a,loc=ahat,scale=ascale))
+                return prior
 
-        adata.X=adata.obsm['X_transformed']
+            @njit
+            def norm_pdf(x,loc,scale):
+                tmp1 = (x-loc)/scale
+                tmp2= np.exp(-.5*tmp1*tmp1)/(constant)
+                return tmp2
+            
+            @njit
+            def preq(a_s,alpha,beta,sigma,X_latent,den):
+
+                #calculate terms from last step, E
+                mean_s = np.dot(a_s,X_latent) #a_s dot x_i for latent cell i
+
+                norm_beta = norm_pdf(beta,loc=mean_s,scale=sigma)
+                norm_alpha = norm_pdf(alpha,loc=mean_s,scale=sigma)
+
+                num_L1 = norm_beta - norm_alpha
+                num_L2 = beta*norm_beta - alpha*norm_alpha
+
+                L1 = num_L1 / den 
+                L2 = -1.0*(num_L2 / den) + 1
+
+                return L1,mean_s
+
+            def marginal_L_faster(a, X_latent,alpha,beta,sigma,ahat):
+                mean = np.dot(a,X_latent)
+                den = norm.cdf(beta,loc=mean,scale=sigma) - norm.cdf(alpha,loc=mean,scale=sigma)
+                return np.sum(np.log(den))+prior(a,ahat,sigma_prior),den
+            
+            @njit
+            def calculate_A_min(X_latent):
+                outerprod_=np.outer(X_latent[:,0],X_latent[:,0])
+                for i_ in np.arange(1, X_latent.shape[1]):
+                    outerprod_ = outerprod_ + np.outer(X_latent[:,i_],X_latent[:,i_])
+                A_min = -.5 / sigma_prior**2 * np.eye(X_latent.shape[0]) - (.5 * outerprod_ / sigma**2)
+                return A_min
+            
+            #@njit
+            def calculate_a_s(mean_s,L1):
+                B_min = ahat / (sigma_prior**2) + np.sum(mean_s*X_latent,axis=1)/sigma**2 - np.sum(L1*X_latent,axis=1)/sigma
+                a_s = -1.0*np.linalg.pinv(A_min+A_min.T).dot(B_min)
+                return a_s
+
+            A = np.zeros((D,D))
+
+            for target in targets:
+                target_ = G_[target]
+                TForder_ix = target_.transcription_factors_indices
+                target_ix = target_.index
+                TForder = target_.transcription_factors
+
+                # calculate constants
+                X_latent = X_[TForder].values.T
+                A_min=calculate_A_min(X_latent)
+
+                #get bounds
+                alpha = alpha_[:,target_ix]
+                beta = beta_[:,target_ix]
+
+                #EM loop
+                ahat = A_[target_ix,TForder_ix]
+                a_s = np.copy(ahat)
+                marginal_likes = [None]*(maxiter+1)
+                marginal_likes[0],den = marginal_L_faster(a_s,X_latent,alpha,beta,sigma,ahat)
+
+                for iteration in np.arange(1, maxiter+1):
+                    L1,mean_s = preq(a_s,alpha,beta,sigma,X_latent,den)
+                    a_s=calculate_a_s(mean_s,L1)
+                    marginal_likes[iteration],den = marginal_L_faster(a_s,X_latent,alpha,beta,sigma,ahat)
+                    if iteration>15:
+                        if float((marginal_likes[iteration]-marginal_likes[iteration-1])/(marginal_likes[1]-marginal_likes[0]))<0.005:
+                            break
+
+                A[target_ix,TForder_ix] = a_s.copy()
+                curves[target] = marginal_likes
+
+            return A,curves
+        
+        start = time.time()
         
         celltypes = adata.obs[celltypes_basis]
+        celltypes_list=list(set(celltypes))
+        self.celltypes_list=celltypes_list
         print("Total number of cells: " + str(len(celltypes)))
-        print("Cell types:", ', '.join(map(str, list(set(celltypes)))))
+        print("Cell types:", ', '.join(map(str, celltypes_list)))
         
         ## Declare variables
         As, curves = {}, {}
-        knn, sigma, sigma_prior=self.knn, self.sigma, self.sigma_prior
         velocities_=pd.DataFrame(columns=adata.var_names.to_list())
         
         """
@@ -80,35 +166,34 @@ class ExpectationMaximization():
         if not alpha_all.empty and not beta_all.empty:
             print("Constraints already calculated.")
         else:
-            alpha_all, beta_all, kNN_graph = get_constraints(adata, celltype_priors, knn, celltypes)
+            alpha_all, beta_all, kNN_graph = get_constraints(adata, celltype_priors, self.knn, celltypes)
             self.alpha_all, self.beta_all, self.kNN_graph = alpha_all, beta_all, kNN_graph
 
         """
         : Start of the main for loop to iterate through cell types
         """
-        for celltype in list(set(celltypes))[:1]:
+        sigma=self.sigma
+        sigma_prior=self.sigma_prior
+        for celltype in celltypes_list:
             print("Running main EM algorithm for for: "+ str(celltype))
-
             G_ = G[celltype]
-            print("shape of G_ in cluster {}".format(celltype), len(G_))
             X_ = adata.uns['X_{}'.format(celltype)].astype(np.float64)
-            print("shape of X_ in cluster {}".format(celltype), X_.values.shape)
+            A_ = self.celltype_priors[celltype].values
+            alpha_ = alpha_all.loc[X_.index][X_.columns].values
+            beta_ = beta_all.loc[X_.index][X_.columns].values
+            
+            targets=list(G_.keys())
+            print("Total number of targets: {}".format(len(targets)))
 
             #precompute any static values before EM and set parameters
             N1, D = X_.shape
             N2 = 0 #not using steady state
             T1 = -1*(N1+N2)/2.0 * np.log(2*np.pi*sigma**2)
-                   
-            alpha = alpha_all.loc[X_.index][X_.columns].values
-            beta = beta_all.loc[X_.index][X_.columns].values
-            A_ = celltype_priors[celltype].values
-            targets=list(G_.keys())[:20]
-            print("Total number of targets: {}".format(len(targets)))
+            constant=np.sqrt(2.0*np.pi)*sigma
             
             """
             : STARTING PARALLELIZATION BY BATCHES
             """
-            
             # Divide data in batches
             batch_size = ceil(len(targets) / self.threads)
             batches = [
@@ -121,36 +206,32 @@ class ExpectationMaximization():
                 # Divide the work to threads
                 parallel_result = Parallel(n_jobs=self.threads)(
                     delayed(fit_gene_analytic)
-                    (self.maxiter,
-                     batch,
-                     alpha,
-                     beta,
-                     T1,
-                     A_,
-                     sigma,
-                     sigma_prior,
-                     G_, 
-                     X_) 
+                    (batch) 
                     for batch in batches
                 )
 
             # Pool returned data from parallel processes
             A = np.sum([parallel_result[i][0] for i in range(num_batches)],axis=0)
-            # A[np.isnan(A)] = A_[np.isnan(A)] 
             As[celltype]=A
-            this_velocity=pd.DataFrame(A.dot(X_.values.T).T, index=X_.index.to_list(), columns=X_.columns.to_list(), dtype='float64')
+            velocity=np.dot(A, X_.values.T).T
+            this_velocity=pd.DataFrame(velocity, index=X_.index.to_list(), columns=X_.columns.to_list(), dtype='float64')
+            
+            # filter for TFs that are not targets in the dynamical model
+            TFs,targets=np.where(np.sum(A,0)!=0)[0],np.where(np.sum(A,1)!=0)[0]
+            invalid_TFs=list(set(TFs)-set(TFs[np.isin(TFs, targets)]))
+            this_velocity=this_velocity.drop(columns=X_.columns[invalid_TFs])
+            
             velocities_=pd.concat([velocities_, this_velocity], join='outer')
-            # temp_curves={}
-            # for i in range(num_batches): temp_curves.update(parallel_result[i][1])
-            # curves[celltype]=temp_curves
 
         """
         : Finish iteration. Update all values in the model
         """
         self.A_ = As
-        self.velocities_ = velocities_.reindex(adata.obs_names.to_list()).fillna(0)
-        # self.curves = curves
-        print("Finished ATACVelo calculation.")
+        self.velocities_= velocities_.reindex(adata.obs_names.to_list()).dropna(how='all', axis='columns')
+        
+        end = time.time()
+        seconds= end - start
+        print("Finished ATACVelo calculation in {} seconds.".format(seconds))
 
         
 """
@@ -183,35 +264,34 @@ def get_constraints(adata, celltype_priors, knn, celltypes):
 
     columns, index = list(adata.var_names), list(adata.obs_names)
     num_cells, num_genes = adata.shape
-    data=pd.DataFrame(adata.obsm['X_transformed'],
-                      columns=adata.var_names,
-                      index=adata.obs_names)
-    data_pca = PCA(n_components=50, svd_solver='randomized').fit_transform(adata.X)
-    kNN_graph = sklearn.neighbors.kneighbors_graph(data_pca, 
-                                               n_neighbors=int(knn), 
-                                               metric='euclidean', 
-                                               n_jobs=5, 
-                                               mode='distance',
-                                               include_self = False).toarray()
+    data=adata.obsm['X_transformed']
+    raw_knn=sklearn.neighbors.kneighbors_graph(adata.obsm['X_pca'],int(knn), mode='connectivity', 
+                                   metric='euclidean', n_jobs=-1, include_self=True).toarray()
+    # Build kNN on the jaccard matrix
+    kNN_graph = sklearn.neighbors.kneighbors_graph(raw_knn, int(knn), mode='distance', 
+                                   metric='jaccard', n_jobs=-1, include_self=False).toarray()
     
     print("Start calculating constraints.")
     
     #compute slopes to all neighbors in KNN graph for constraint computation
     prior_genes = {}
     for celltype in set(celltypes):
-        prior_genes[celltype] = [columns.index(gene) for gene in list(celltype_priors[celltype])]
+        prior_genes[celltype] = np.array([columns.index(gene) for gene in list(celltype_priors[celltype])])
 
-    alpha_all,beta_all = np.zeros((num_cells, num_genes)), np.zeros((num_cells, num_genes))
+    alpha_all,beta_all = np.zeros((num_cells, num_genes), dtype=np.float64), np.zeros((num_cells, num_genes), dtype=np.float64)
     #get velocities for each cell
+    columns, index = list(adata.var_names), list(adata.obs_names)
     for cellrand in range(num_cells):
         print("\r{}".format(cellrand),end="")
         slopedist = data.iloc[np.where(kNN_graph[cellrand,:])[0]].values - data.iloc[cellrand].values
         offset = np.std(slopedist,axis=0) / 10.0
+        # clip zero values to avoid nans
+        offset = np.clip(offset, 1e-10, np.max(offset))
         #cluster velocities using DBSCAN with cosine distance as metric
         prior = celltype_priors[celltypes[cellrand]]
         prior_pred = prior.dot(data.iloc[cellrand][list(prior)])
-        use_genes_ = prior_genes[celltypes[cellrand]]
-        
+        use_genes_ =prior_genes[celltypes[cellrand]]
+
         kmeds = DBSCAN(eps=.5,metric='cosine',min_samples=3).fit(slopedist)
         if (len(kmeds.components_))==0:
             # Try a looser constraint if running into outlier problem
@@ -221,100 +301,12 @@ def get_constraints(adata, celltype_priors, knn, celltypes):
         for i in range(num_components):
             cosinecorrs[i]=1.0-cosine(kmeds.components_[i][use_genes_],prior_pred)
         med = kmeds.components_[np.argmax(cosinecorrs)]
-        alpha_all[cellrand,:] = med - offset
-        beta_all[cellrand,:] = med + offset
+        alpha_all[cellrand, :] = med - offset
+        beta_all[cellrand, :] = med + offset
     print("\nFinished getting all constraints.")
 
     return pd.DataFrame(alpha_all.astype(np.float64), columns=columns, index=index), pd.DataFrame(beta_all.astype(np.float64), columns=columns, index=index), kNN_graph
         
-def fit_gene_analytic(maxiter,
-                      targets, 
-                      alpha_all,
-                      beta_all,
-                      T1,
-                      A_,
-                      sigma,
-                      sigma_prior,
-                      G_, 
-                      X_):
-
-    curves = {}
-    # traces = {}
-    constant=np.sqrt(2.0*np.pi)*sigma
-    
-    def prior(a,ahat,ascale):
-        return np.sum(norm.logpdf(a,loc=ahat,scale=ascale))
-
-    def norm_pdf(x,loc,scale):
-        tmp1 = (x-loc)/scale
-        return np.exp(-.5*tmp1*tmp1)/(constant)
-
-    def preq(a_s,alpha,beta,sigma,X_latent,den):
-
-        #calculate terms from last step, E
-        mean_s = a_s.dot(X_latent) #a_s dot x_i for latent cell i
-
-        norm_beta = norm_pdf(beta,loc=mean_s,scale=sigma)
-        norm_alpha = norm_pdf(alpha,loc=mean_s,scale=sigma)
-
-        num_L1 = norm_beta - norm_alpha
-        num_L2 = beta*norm_beta - alpha*norm_alpha
-
-        L1 = num_L1 / den
-        L2 = -1.0*(num_L2 / den) + 1
-
-        S_s =  -1.0/(2*np.pi*sigma**2) * np.sum(np.power(mean_s,2)) + (1.0/sigma) * np.sum(mean_s*L1) - .5 * np.sum(L2)
-
-        return S_s,L1,mean_s
-
-    def q_faster(a,S_s,L1,mean_s,sigma,T,ahat):
-        mean_latent = a.dot(X_latent) #a dot x_i for latent cell i
-        return -1.0*(prior(a,ahat,50.0) + T + S_s - 1.0/(2*sigma**2) * np.sum(np.power(mean_latent,2)) + 1.0/(sigma**2) * np.sum(mean_s*mean_latent) - (1.0/sigma) * np.sum(mean_latent*L1))
-
-    def marginal_L_faster(a,X_latent,alpha,beta,sigma,ahat):
-        mean = a.dot(X_latent)
-        den = norm.cdf(beta,loc=mean,scale=sigma) - norm.cdf(alpha,loc=mean,scale=sigma)
-        return np.sum(np.log(den))+prior(a,ahat,sigma_prior),den
-    
-    D = X_.shape[1]
-    A = np.zeros((D,D))
-    failed = []
-    for target in targets:
-        target_ = G_[target]
-        
-        TForder_ix = target_.transcription_factors_indices
-        target_ix = target_.index
-        print(target_ix)
-        TForder = target_.transcription_factors
-        X_latent = X_[TForder].values.T
-            
-        #get bounds
-        alpha = alpha_all[:,target_ix]
-        beta = beta_all[:,target_ix]
-
-        #EM loop
-        ahat = A_[target_ix,TForder_ix]
-        a_s = np.copy(ahat)
-        marginal_likes = [None]*(maxiter+1)
-        marginal_likes[0],den = marginal_L_faster(a_s,X_latent,alpha,beta,sigma,ahat)
-        check_iter=maxiter/2
-        for iteration in np.arange(1, maxiter+1):
-            S_s,L1,mean_s = preq(a_s,alpha,beta,sigma,X_latent,den)
-            outerprod_ = [np.outer(X_latent[:,i_],X_latent[:,i_]) for i_ in range(X_latent.shape[1])]
-            outerprod_ = np.sum(outerprod_,axis=0)
-            A_min = -.5 / sigma_prior**2 * np.eye(X_latent.shape[0]) - (.5 * outerprod_ / sigma**2)
-            B_min = ahat / (sigma_prior**2) + np.sum(mean_s*X_latent,axis=1)/sigma**2 - np.sum(L1*X_latent,axis=1)/sigma
-            a_s = -1.0*np.linalg.pinv(A_min+A_min.T).dot(B_min)
-            marginal_likes[iteration],den = marginal_L_faster(a_s,X_latent,alpha,beta,sigma,ahat)
-            if iteration>15:
-                if float((marginal_likes[iteration]-marginal_likes[iteration-1])/(marginal_likes[1]-marginal_likes[0]))<0.005:
-                    break
-                    
-        A[target_ix,TForder_ix] = a_s.copy()
-        curves[target] = marginal_likes
-
-    return A,curves
-
 """
 : Progress Bar
 """
