@@ -60,6 +60,7 @@ class GenomeRecord():
             
             TXDB= importr('TxDb.Mmusculus.UCSC.mm10.knownGene')
             self.genome_annotations = TXDB.TxDb_Mmusculus_UCSC_mm10_knownGene
+            self.species = 'mouse'
 
         
         elif genome == 'hg38':
@@ -71,6 +72,7 @@ class GenomeRecord():
             
             TXDB= importr('TxDb.Hsapiens.UCSC.hg38.knownGene')
             self.genome_annotations = TXDB.TxDb_Hsapiens_UCSC_hg38_knownGene
+            self.species = 'human'
             
 
 class PeakAnnotation():
@@ -82,27 +84,27 @@ class PeakAnnotation():
         self.genes = adata.var_names
         self.adata = adata
         
-        #set up R environment
-        print("Checking R packages are installed ...")
-        packnames = ("BiocManager")
-        bioc_packnames =('BiocGenerics','S4Vectors','methods',
-                         'GenomicFeatures','GenomicRanges','IRanges','TxDb.Hsapiens.UCSC.hg38.knownGene',
-                         'TxDb.Mmusculus.UCSC.mm10.knownGene','ChIPseeker')
+#         #set up R environment
+#         print("Checking R packages are installed ...")
+#         packnames = ("BiocManager")
+#         bioc_packnames =('BiocGenerics','S4Vectors','methods',
+#                          'GenomicFeatures','GenomicRanges','IRanges','TxDb.Hsapiens.UCSC.hg38.knownGene',
+#                          'TxDb.Mmusculus.UCSC.mm10.knownGene','ChIPseeker')
 
-        utils = rpackages.importr('utils')
-        utils.chooseCRANmirror(ind=1) 
+#         utils = rpackages.importr('utils')
+#         utils.chooseCRANmirror(ind=1) 
 
-        names_to_install = [x for x in packnames if not rpackages.isinstalled(x)]
-        if len(names_to_install) > 0:
-            utils.install_packages(StrVector(names_to_install))
+#         names_to_install = [x for x in packnames if not rpackages.isinstalled(x)]
+#         if len(names_to_install) > 0:
+#             utils.install_packages(StrVector(names_to_install))
 
-        bioc =  importr("BiocManager")
-        names_to_install = [x for x in bioc_packnames if not rpackages.isinstalled(x)]
-        if len(names_to_install) > 0:
-            bioc.install(StrVector(names_to_install))
+#         bioc =  importr("BiocManager")
+#         names_to_install = [x for x in bioc_packnames if not rpackages.isinstalled(x)]
+#         if len(names_to_install) > 0:
+#             bioc.install(StrVector(names_to_install))
         
-        print(" ")
-        print("Finished setting up R packages")
+#         print(" ")
+#         print("Finished setting up R packages")
 
         # loading genome-specific files needed for motif calling & target identification
         if type(genome) == GenomeRecord:
@@ -122,6 +124,7 @@ class PeakAnnotation():
 
                 TXDB= importr('TxDb.Mmusculus.UCSC.mm10.knownGene')
                 self.genome_annotations = TXDB.TxDb_Mmusculus_UCSC_mm10_knownGene
+                self.species = 'mouse'
 
 
             elif genome == 'hg38':
@@ -133,6 +136,7 @@ class PeakAnnotation():
 
                 TXDB= importr('TxDb.Hsapiens.UCSC.hg38.knownGene')
                 self.genome_annotations = TXDB.TxDb_Hsapiens_UCSC_hg38_knownGene
+                self.species = 'human'
             
 
     #wrapper to run all of the below functions sequentially        
@@ -229,7 +233,7 @@ class PeakAnnotation():
 
     def extract_peak_sequence(self, peak_bed_file):
         print("Extracting peak sequence...")
-        record_dict = {}
+        record_dict={}
         for i,row in enumerate(peak_bed_file.iterrows()):
             print("\r{}".format(i),end="")
             peak = row[1].values
@@ -350,17 +354,28 @@ class PeakAnnotation():
         annoPeakTab = annoPeakTab.loc[index]
 
         print("Converting gene annotations ...")          
-        #todo: update to make sure gene bodies are accounted for
+        
         mg = mygene.MyGeneInfo()
-        gene_names=[]
+#         gene_names=[]
+#         num_failed=0
+#         for i in annoPeakTab['geneId']:
+#             try:
+#                 gene_names.append(mg.getgene(i)['symbol'].upper())
+#             except:
+#                 gene_names.append('failed')
+#                 num_failed+=1
+
+        queries = mg.querymany(annoPeakTab['geneId'].values,species=self.species)
+        gene_names = []
         num_failed=0
-        for i in annoPeakTab['geneId']:
+        for gene in queries:
             try:
-                gene_names.append(mg.getgene(i)['symbol'].upper())
+                gene_names.append(gene['symbol'])
             except:
-                gene_names.append('failed')
+                gene_names.append("NA")
                 num_failed+=1
-        annoPeakTab['target'] = gene_names
+
+        annoPeakTab['target'] = [gene.upper() for gene in gene_names]
         if (num_failed/len(gene_names))>0.005:
             print("Gene matching to database failed. Data not usable")
         else:

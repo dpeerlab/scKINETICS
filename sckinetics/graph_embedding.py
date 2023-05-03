@@ -20,16 +20,20 @@ import matplotlib.pyplot as plt
 class VelocityGraph():
     
         
-    def __init__(self, model, adata, palette=None, knn=5):
+    def __init__(self, model, adata, celltype_basis=None,select_celltypes=None,palette=None, knn=50):
         
         '''
         palette needs to be a set
+        select_celltypes: a list of cell types to generate the velocity graph with (only use this option if the model was fit on certain celltypes); default None (running on all cell types)
         '''
         
-        self.adata=adata
-        self.model = model #pre-computed velocity model; has to already be fitted
+        if select_celltypes:
+            self.adata=adata[adata.obs[celltype_basis].isin(select_celltypes),:]
+            self.velocities=model.velocities_.iloc[np.where(adata.obs[celltype_basis].isin(select_celltypes))[0],:]
+        else:
+            self.adata=adata
+            self.velocities=model.velocities_
         print("Make sure that the model had already been fitted!")
-        self.velocities=self.model.velocities_
         self.knn=knn #for better velocity stream visualizations, we use a smaller knn value to construct the graph
         
         self.graph=None
@@ -52,6 +56,7 @@ class VelocityGraph():
         self.velocity_graph = np.zeros((N,N))
         for i in tqdm(range(N)): #for each cell
             neighs_idx = list(self.graph[i].indices)
+            # take intersection of the genes that have calculated velocities across all neighbors
             use_genes=self.velocities.iloc[[i]+neighs_idx].dropna(axis='columns', how='any').columns
             data_tmp=self.adata.obsm['X_transformed'][use_genes].values
             dX = data_tmp[neighs_idx,:] - data_tmp[i,:] #compute vectors of cell to neighbors
@@ -121,23 +126,33 @@ def embedding_stream(embedding,V_emb,figsize=(10,10),density=2, arrowsize=2,
     ax.axis("off");
     return ax
 
-# def embedding_stream_subset(adata, embedding, celltype, celltype_basis, V_emb=velocity_embedding, celltypes_colors=celltypes_colors, figsize=(5,5),density=2, arrowsize=1, s=4, linewidth=1, stream_color='black', alpha=0.7):
-#     if velocity_embedding is None:
-#         print("Need to first compute velocity embeddings!")
-#     if celltypes_colors is None:
-#         print("Need to first define celltype colors.")
-#     subset_index=np.where(adata.obs[celltype_basis]==celltype)
-#     cluster_color=pd.Series(celltypes_colors)
-#     X_grid, V_grid = compute_velocity_on_grid(X_emb=embedding[subset_index], V_emb=V_emb[subset_index],
-#                        density=density,n_neighbors=30,autoscale=False, adjust_for_stream=True)
-#     fig,ax = plt.subplots(figsize=figsize)
-#     ax.streamplot(X_grid[0], X_grid[1], V_grid[0], V_grid[1], 
-#                    zorder=1, density=density,color=stream_color,
-#                   arrowsize=arrowsize,linewidth=linewidth)
-#     ax.scatter(x=embedding[subset_index, 0], y=embedding[subset_index, 1], zorder=0, s=s, c=cluster_color.loc[subset_index], alpha=alpha)
-#     ax.set_title(celltype)
-#     ax.axis("off");
-#     return ax
+
+def embedding_stream_subset(embedding, adata, celltypes_to_plot, celltype_basis, V_emb,celltypes_colors,plot_alone=True,
+                             figsize=(10,10),density=3, arrowsize=2, 
+                     s=4.5, linewidth=1.5, stream_color='black', alpha=0.7):
+    """
+    : plot_alone: True, returns a streamplot with just the specified cluster(s); False, returns a streamplot on the original embedding but velocity vectors only on the specified cluster(s)
+    : celltypes_to_plot: a list of celltypes in adata.obs[celltype_basis] to plot stream plot
+    : celltypes_colors: a list of color codes organized for each individual cell
+    """
+    if velocity_embedding is None:
+        print("Need to first compute velocity embeddings!")
+    if celltypes_colors is None:
+        print("Need to first define celltype colors.")
+    subset_index=np.where(adata.obs[celltype_basis].isin(celltypes_to_plot))[0]
+    cluster_color=pd.Series(celltypes_colors)
+    X_grid, V_grid = compute_velocity_on_grid(X_emb=embedding[subset_index], V_emb=V_emb[subset_index],
+                       density=density,n_neighbors=50,autoscale=False, adjust_for_stream=True)
+    fig,ax = plt.subplots(figsize=figsize)
+    ax.streamplot(X_grid[0], X_grid[1], V_grid[0], V_grid[1], 
+                   zorder=1, density=density,color=stream_color,
+                  arrowsize=arrowsize,linewidth=linewidth)
+    if plot_alone==False:
+        ax.scatter(x=embedding[:, 0], y=embedding[:, 1], zorder=0, s=s, c=cluster_color, alpha=0.2)
+    ax.scatter(x=embedding[subset_index, 0], y=embedding[subset_index, 1], zorder=0, s=s, c=cluster_color[subset_index], alpha=alpha)
+    ax.set_title(celltypes_to_plot)
+    ax.axis("off");
+    return ax
 
 #wrapper function to run all
 def plot_velocities_scatter(adata,model,knn=30,embedding_basis=None,figsize=(10,10),

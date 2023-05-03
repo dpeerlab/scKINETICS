@@ -25,7 +25,7 @@ from .base import check_is_fitted
 class ExpectationMaximization():
     
         
-    def __init__(self, maxiter=20, tol=.0001, knn=50, sigma=5.0, sigma_prior = 1.0, threads=20):
+    def __init__(self, maxiter=20, tol=0.005, knn=50, sigma=5.0, sigma_prior = 1.0, threads=20):
         self.maxiter = maxiter
         assert (maxiter >= 15 and maxiter <=30), f"We suggest maxiter between 15 to 30, got: {maxiter}"
         self.tol = tol
@@ -49,11 +49,17 @@ class ExpectationMaximization():
         print('Number of CPUs: {}.'.format(os.cpu_count()))
         print('Running on {} threads.'.format(threads))
     
-    def fit(self, adata, G, celltypes_basis=None):
-        
+    def fit(self, adata, G, celltype_basis=None, select_celltypes=None):
+        """
+        : adata, G: output from tf_targets
+        : celltype_basis: variable name for storing celltypes in adata.obs
+        : select_celltypes: a list of cell types to fit the model on; default None (running on all cell types)
+        """
+    
         def fit_gene_analytic(targets):
  
             maxiter=self.maxiter
+            tol=self.tol
             curves = {}
             
             def prior(a,ahat,ascale):
@@ -86,7 +92,8 @@ class ExpectationMaximization():
             def marginal_L_faster(a, X_latent,alpha,beta,sigma,ahat):
                 mean = np.dot(a,X_latent)
                 den = norm.cdf(beta,loc=mean,scale=sigma) - norm.cdf(alpha,loc=mean,scale=sigma)
-                return np.sum(np.log(den))+prior(a,ahat,sigma_prior),den
+                marginal_l=np.sum(np.log(den))+prior(a,ahat,sigma_prior)
+                return marginal_l,den
             
             @njit
             def calculate_A_min(X_latent):
@@ -129,7 +136,7 @@ class ExpectationMaximization():
                     a_s=calculate_a_s(mean_s,L1)
                     marginal_likes[iteration],den = marginal_L_faster(a_s,X_latent,alpha,beta,sigma,ahat)
                     if iteration>15:
-                        if float((marginal_likes[iteration]-marginal_likes[iteration-1])/(marginal_likes[1]-marginal_likes[0]))<0.005:
+                        if float((marginal_likes[iteration]-marginal_likes[iteration-1])/(marginal_likes[1]-marginal_likes[0]))<tol:
                             break
 
                 A[target_ix,TForder_ix] = a_s.copy()
@@ -139,7 +146,7 @@ class ExpectationMaximization():
         
         start = time.time()
         
-        celltypes = adata.obs[celltypes_basis]
+        celltypes = adata.obs[celltype_basis]
         celltypes_list=list(set(celltypes))
         self.celltypes_list=celltypes_list
         print("Total number of cells: " + str(len(celltypes)))
@@ -174,6 +181,10 @@ class ExpectationMaximization():
         """
         sigma=self.sigma
         sigma_prior=self.sigma_prior
+        
+        if select_celltypes:
+            celltypes_list=select_celltypes
+            
         for celltype in celltypes_list:
             print("Running main EM algorithm for for: "+ str(celltype))
             G_ = G[celltype]
@@ -216,6 +227,11 @@ class ExpectationMaximization():
             velocity=np.dot(A, X_.values.T).T
             this_velocity=pd.DataFrame(velocity, index=X_.index.to_list(), columns=X_.columns.to_list(), dtype='float64')
             
+            this_curve={}
+            for i in range(num_batches):
+                this_curve.update(parallel_result[i][1])
+            curves[celltype]=this_curve
+            
             # filter for TFs that are not targets in the dynamical model
             TFs,targets=np.where(np.sum(A,0)!=0)[0],np.where(np.sum(A,1)!=0)[0]
             invalid_TFs=list(set(TFs)-set(TFs[np.isin(TFs, targets)]))
@@ -227,7 +243,9 @@ class ExpectationMaximization():
         : Finish iteration. Update all values in the model
         """
         self.A_ = As
+        # drop genes that have no calculated velocity across all cells
         self.velocities_= velocities_.reindex(adata.obs_names.to_list()).dropna(how='all', axis='columns')
+        self.curves=curves
         
         end = time.time()
         seconds= end - start
@@ -280,7 +298,7 @@ def get_constraints(adata, celltype_priors, knn, celltypes):
 
     alpha_all,beta_all = np.zeros((num_cells, num_genes), dtype=np.float64), np.zeros((num_cells, num_genes), dtype=np.float64)
     #get velocities for each cell
-    columns, index = list(adata.var_names), list(adata.obs_names)
+
     for cellrand in range(num_cells):
         print("\r{}".format(cellrand),end="")
         slopedist = data.iloc[np.where(kNN_graph[cellrand,:])[0]].values - data.iloc[cellrand].values
@@ -292,10 +310,14 @@ def get_constraints(adata, celltype_priors, knn, celltypes):
         prior_pred = prior.dot(data.iloc[cellrand][list(prior)])
         use_genes_ =prior_genes[celltypes[cellrand]]
 
-        kmeds = DBSCAN(eps=.5,metric='cosine',min_samples=3).fit(slopedist)
-        if (len(kmeds.components_))==0:
-            # Try a looser constraint if running into outlier problem
-            kmeds = DBSCAN(eps=.5,metric='cosine',min_samples=2).fit(slopedist)
+        e=0.03
+        kmeds = DBSCAN(eps=e,metric='cosine',min_samples=2).fit(slopedist)
+        while (len(kmeds.components_)>10) and (e>0.01):
+            e=e-0.01
+            kmeds = DBSCAN(eps=e,metric='cosine',min_samples=2).fit(slopedist)
+        while(len(kmeds.components_)<5):
+            e=e+0.01
+            kmeds = DBSCAN(eps=e,metric='cosine',min_samples=2).fit(slopedist)
         num_components=len(kmeds.components_)
         cosinecorrs = [None]*num_components
         for i in range(num_components):
