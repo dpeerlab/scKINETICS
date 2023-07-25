@@ -4,3 +4,6 @@ We introduce scKINETICS (Key regulatory Interaction NETwork for Inferring Cell S
 ## Demo
 
 The demo shows the main functionalities of the package including input file generation, GRN construction, EM estimation, visualizations, and the TF ablation experiment. 
+
+## Paper
+https://academic.oup.com/bioinformatics/article/39/Supplement_1/i394/7210448
