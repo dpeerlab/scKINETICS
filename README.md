@@ -5,10 +5,5 @@ We introduce scKINETICS (Key regulatory Interaction NETwork for Inferring Cell S
 
 The demo shows the main functionalities of the package including input file generation, GRN construction, EM estimation, visualizations, and the TF ablation experiment. 
 
-## Data availability
-
-Though the pancreas regeneration is not yet public, this method can work on any scRNAseq + bulk ATAC/scATAC/ChipSEQ/Multiome data.
-
-## Readthedocs
-
-[readthedocs](https://sckinetics.readthedocs.io/en/latest/index.html)
+## Paper
+https://academic.oup.com/bioinformatics/article/39/Supplement_1/i394/7210448
